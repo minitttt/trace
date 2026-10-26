@@ -39,6 +39,9 @@ export function NewLessonForm({ userId }: { userId: string }) {
 
       if (activeFile) {
         if (activeFile.size > 500 * 1024 * 1024) throw new Error("Choose a source smaller than 500 MB.");
+        if (sourceType === "pdf" && activeFile.size > 50 * 1024 * 1024) {
+          throw new Error("Choose a PDF smaller than 50 MB.");
+        }
         sourcePath = `${userId}/${crypto.randomUUID()}-${activeFile.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
         const contentType =
           activeFile.type || (sourceType === "pdf" ? "application/pdf" : "video/mp4");

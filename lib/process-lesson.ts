@@ -1,10 +1,20 @@
 import { inngest } from "@/lib/inngest";
-import { analyzeSource } from "@/lib/providers/gemini";
+import {
+  analyzePreparedSource,
+  uploadSourceFile,
+  waitForUploadedSource,
+} from "@/lib/providers/gemini";
 import { createFallbackLearningMaterial, createLearningMaterial } from "@/lib/providers/mistral";
 import { createServiceClient } from "@/lib/supabase/server";
 import { lessonPreferencesSchema, type Lesson, type LessonPreferences } from "@/lib/types";
 
 export const PROCESSING_STALE_MS = 5 * 60_000;
+
+// Never run a fire-and-forget lesson job inside a production Vercel request.
+// Production must use Inngest so the work survives the request ending.
+export function isLocalProcessingEnabled() {
+  return process.env.NODE_ENV !== "production" && process.env.TRACE_LOCAL_PROCESSING !== "false";
+}
 
 type StepRunner = {
   run: (name: string, handler: () => Promise<unknown>) => Promise<unknown>;
@@ -75,12 +85,26 @@ async function claimLesson(lessonId: string, allowRetry: boolean) {
   return Boolean(staleClaim);
 }
 
-function userFacingProcessingError(error: unknown) {
+function userFacingProcessingError(error: unknown, stage: string) {
   const message = error instanceof Error ? error.message : String(error);
-  if (/unsupported|mime|file|source/i.test(message)) {
+  if (/GOOGLE_GEMINI_API_KEY|MISTRAL_API_KEY|SUPABASE_SERVICE_ROLE_KEY|not configured|unauthorized|forbidden|\b401\b|\b403\b/i.test(message)) {
+    return "AI processing is not configured correctly on the server. Check the production environment variables.";
+  }
+  if (/download source|storage|No source was provided|unsupported|mime|file/i.test(message)) {
     return "We could not read this source. Try a supported video or PDF file, or a public video URL.";
   }
-  if (/timed out|unavailable|rate limit|high demand|temporarily/i.test(message)) {
+  if (/429|quota|rate limit|resource exhausted|high demand|temporarily unavailable/i.test(message)) {
+    return "The AI service is temporarily at capacity. Please try again in a moment.";
+  }
+  if (/timed out|timeout|deadline/i.test(message)) {
+    return stage === "reading_source"
+      ? "Source analysis took too long. Try a shorter video or PDF."
+      : "Lesson processing took too long. Please try again in a moment.";
+  }
+  if (/invalid|JSON|schema|empty/i.test(message)) {
+    return "The AI returned an incomplete result for this source. Please try again.";
+  }
+  if (/unavailable|temporarily/i.test(message)) {
     return "The source could not be processed right now. Please try again in a moment.";
   }
   return "We could not finish building this lesson. Please try again.";
@@ -113,33 +137,55 @@ export async function processLessonJob(
   const claimed = await claimLesson(lesson.id, options.allowRetry === true);
   if (!claimed) return { lessonId: lesson.id, status: "processing" };
 
+  let activeStage = "reading_source";
+
   try {
     const runStep = <T>(name: string, handler: () => Promise<T>) =>
       step ? (step.run(name, handler) as Promise<T>) : handler();
 
-    const source = await runStep("analyze-source", async () => {
-      let bytes: Buffer | undefined;
-      if (lesson.source_path) {
-        const { data, error } = await supabase.storage.from("sources").download(lesson.source_path);
-        if (error || !data)
-          throw error ?? new Error("Could not download source from Supabase Storage");
-        bytes = Buffer.from(await data.arrayBuffer());
+    const sourceReference = await runStep("prepare-source", async () => {
+      if (lesson.public_url) {
+        return { sourcePart: { type: "video" as const, uri: lesson.public_url } };
       }
 
-      const analysis = await analyzeSource({
-        sourceType: lesson.source_type,
-        bytes,
+      if (!lesson.source_path) throw new Error("No source was provided to Gemini");
+      const { data, error } = await supabase.storage.from("sources").download(lesson.source_path);
+      if (error || !data) throw error ?? new Error("Could not download source from Supabase Storage");
+
+      const fileName = await uploadSourceFile({
+        bytes: Buffer.from(await data.arrayBuffer()),
         mimeType: sourceMimeType(lesson.source_path, lesson.source_type),
-        fileName: lesson.source_path?.split("/").pop(),
+        fileName: lesson.source_path.split("/").pop(),
+      });
+      return { uploadedFileName: fileName };
+    });
+
+    const sourcePart = await runStep("wait-for-source", async () => {
+      if (sourceReference.uploadedFileName) {
+        return waitForUploadedSource({
+          fileName: sourceReference.uploadedFileName,
+          sourceType: lesson.source_type,
+        });
+      }
+      if (!sourceReference.sourcePart) throw new Error("No source was provided to Gemini");
+      return sourceReference.sourcePart;
+    });
+
+    const source = await runStep("analyze-source", async () => {
+      const analysis = await analyzePreparedSource({
+        sourceType: lesson.source_type,
+        sourcePart,
         publicUrl: lesson.public_url ?? undefined,
       });
 
       // Mark extracting_content after source analysis so the stage is visible
+      activeStage = "extracting_content";
       await updateLesson(lesson.id, { processing_stage: "extracting_content" });
       return analysis;
     });
 
     // Mark creating_material right before the Mistral step starts
+    activeStage = "creating_material";
     await updateLesson(lesson.id, { processing_stage: "creating_material" });
 
     const preferences = lessonPreferencesSchema.parse({
@@ -162,6 +208,7 @@ export async function processLessonJob(
       }
     }
 
+    activeStage = "preparing_tutor";
     await updateLesson(lesson.id, { processing_stage: "preparing_tutor" });
     const { error: contentError } = await supabase.from("lesson_content").upsert({
       lesson_id: lesson.id,
@@ -184,14 +231,24 @@ export async function processLessonJob(
 
     return { lessonId: lesson.id, status: "complete" };
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("Trace lesson processing failed", {
+      lessonId: lesson.id,
+      stage: activeStage,
+      message,
+    });
     if (options.finalAttempt !== false) {
-      await updateLesson(
-        lesson.id,
-        {
+      try {
+        await updateLesson(lesson.id, {
           status: "failed",
-          processing_error: userFacingProcessingError(error),
-        },
-      );
+          processing_error: userFacingProcessingError(error, activeStage),
+        });
+      } catch (updateError) {
+        console.error("Trace could not save lesson processing failure", {
+          lessonId: lesson.id,
+          message: updateError instanceof Error ? updateError.message : String(updateError),
+        });
+      }
     }
     throw error;
   }

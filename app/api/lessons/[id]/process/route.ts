@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { inngest } from "@/lib/inngest";
 import { createClient } from "@/lib/supabase/server";
-import { PROCESSING_STALE_MS, processLessonJob } from "@/lib/process-lesson";
+import { isLocalProcessingEnabled, PROCESSING_STALE_MS, processLessonJob } from "@/lib/process-lesson";
 
 export async function POST(_request: Request, { params }: { params: { id: string } }) {
   const authClient = await createClient();
@@ -17,8 +17,7 @@ export async function POST(_request: Request, { params }: { params: { id: string
     .single();
   if (error || !lesson) return NextResponse.json({ error: "Lesson not found" }, { status: 404 });
   if (lesson.status === "complete") return NextResponse.json({ status: "complete" });
-  const isLocalProcessing =
-    process.env.NODE_ENV !== "production" || process.env.TRACE_LOCAL_PROCESSING === "true";
+  const isLocalProcessing = isLocalProcessingEnabled();
   const isFresh = Date.now() - new Date(lesson.updated_at).getTime() < PROCESSING_STALE_MS;
   if (lesson.status === "processing" && isFresh)
     return NextResponse.json({ status: "processing" });

@@ -191,6 +191,23 @@ Test in this order:
 
 The browser only receives Supabase public credentials. Gemini, Mistral, Groq, ElevenLabs, Inngest signing, and the service-role key are read only in server-side modules and route handlers.
 
+### If production shows “The source could not be processed right now”
+
+Redeploy after the latest code changes, then check these items:
+
+1. In Vercel, confirm `TRACE_LOCAL_PROCESSING` is `false` and `TRACE_ALLOW_LOCAL_FALLBACK` is `false` for Production. Production now refuses to run a fire-and-forget processor inside a Vercel request and always uses Inngest.
+2. Confirm `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` are present in the Vercel Production environment.
+3. In Inngest, sync the deployed endpoint exactly as:
+
+   ```text
+   https://YOUR_DOMAIN/api/inngest
+   ```
+
+4. Open the failed run in Inngest and inspect the `analyze-source` or `create-learning-material` step. The application now logs the lesson ID, stage, and sanitized error category.
+5. Confirm `GOOGLE_GEMINI_API_KEY`, `MISTRAL_API_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` are set in Vercel Production, not only Preview.
+6. Use a PDF smaller than 50 MB or a short video for the first test. Gemini's PDF limit is 50 MB, and the app now rejects larger PDFs before creating a lesson.
+7. Retry the failed lesson after deployment. Existing failed lessons can be retried from the lesson page.
+
 ## Checks
 
 ```bash

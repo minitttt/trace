@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { inngest } from "@/lib/inngest";
-import { processLessonJob } from "@/lib/process-lesson";
+import { isLocalProcessingEnabled, processLessonJob } from "@/lib/process-lesson";
 import { createClient } from "@/lib/supabase/server";
 import { lessonPreferencesSchema, sourceTypeSchema } from "@/lib/types";
 import { z } from "zod";
@@ -102,7 +102,7 @@ export async function POST(request: Request) {
       { status: 500 },
     );
 
-  if (process.env.NODE_ENV !== "production" || process.env.TRACE_LOCAL_PROCESSING === "true") {
+  if (isLocalProcessingEnabled()) {
     void processLessonJob(lesson.id).catch((processingError) =>
       console.error("Trace local lesson processing failed", processingError),
     );

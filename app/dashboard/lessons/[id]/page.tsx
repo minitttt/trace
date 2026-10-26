@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { ProcessingView } from "@/components/processing-view";
 import { LessonWorkspace } from "@/components/lesson-workspace";
+import { isLocalProcessingEnabled } from "@/lib/process-lesson";
 import { createClient } from "@/lib/supabase/server";
 import { lessonContentSchema, type ChatMessage, type Lesson, type LessonContent } from "@/lib/types";
 
@@ -35,9 +36,7 @@ export default async function LessonPage({ params }: { params: { id: string } })
         {lesson.status !== "complete" || !content ? (
           <ProcessingView
             initialLesson={lesson}
-            autoStartProcessing={
-              process.env.NODE_ENV !== "production" || process.env.TRACE_LOCAL_PROCESSING === "true"
-            }
+             autoStartProcessing={isLocalProcessingEnabled()}
           />
         ) : (
           <LessonWorkspace
