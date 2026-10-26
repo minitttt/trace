@@ -8,8 +8,9 @@ Trace turns one uploaded video or PDF into a focused learning workspace with sou
 - Tailwind CSS with small shadcn-style primitives
 - Supabase Auth, Postgres, and private Storage
 - Inngest for resilient background processing
-- Gemini (`@google/genai`) for multimodal source analysis
-- Mistral (`@mistralai/mistralai`) for learning material and tutor responses
+- Gemini (`@google/genai`) for primary multimodal source analysis
+- Mistral (`@mistralai/mistralai`) for PDF OCR, fallback source analysis, learning material, and tutor responses
+- Groq for tutor chat, video transcription fallback, and learning-material fallback
 - Zod for API and provider output validation
 
 ## Local setup
@@ -30,6 +31,7 @@ Trace turns one uploaded video or PDF into a focused learning workspace with sou
    - Supabase service role key (server-only)
    - Gemini API key (server-only)
    - Mistral API key (server-only)
+   - Groq API key (server-only; used for tutor chat and fallbacks)
    - Inngest event and signing keys
 
 5. Start the app:
@@ -42,7 +44,7 @@ Trace turns one uploaded video or PDF into a focused learning workspace with sou
 
    ```bash
     npx inngest-cli@latest dev -u http://localhost:3000/api/inngest
-    ```
+   ```
 
 ## Google sign-in setup
 
@@ -132,7 +134,10 @@ INNGEST_EVENT_KEY
 INNGEST_SIGNING_KEY
 TRACE_GEMINI_MODELS
 TRACE_MISTRAL_MODEL
+TRACE_MISTRAL_OCR_MODEL
+TRACE_MISTRAL_TRANSCRIPTION_MODEL
 TRACE_GROQ_MODEL
+TRACE_GROQ_TRANSCRIPTION_MODEL
 TRACE_PODCAST_GEMINI_MODEL
 TRACE_LOCAL_PROCESSING=false
 TRACE_ALLOW_LOCAL_FALLBACK=false
@@ -206,7 +211,9 @@ Redeploy after the latest code changes, then check these items:
 4. Open the failed run in Inngest and inspect the `analyze-source` or `create-learning-material` step. The application now logs the lesson ID, stage, and sanitized error category.
 5. Confirm `GOOGLE_GEMINI_API_KEY`, `MISTRAL_API_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` are set in Vercel Production, not only Preview.
 6. Use a PDF smaller than 50 MB or a short video for the first test. Gemini's PDF limit is 50 MB, and the app now rejects larger PDFs before creating a lesson.
-7. Retry the failed lesson after deployment. Existing failed lessons can be retried from the lesson page.
+7. If Gemini is rate-limited, PDFs automatically use Mistral OCR and videos automatically use Groq transcription. Mistral structures the extracted content, with Groq as the text-generation fallback.
+8. If Mistral is rate-limited while creating learning material, Groq automatically generates the material instead.
+9. Retry the failed lesson after deployment. Existing failed lessons can be retried from the lesson page.
 
 ## Checks
 

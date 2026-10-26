@@ -1,10 +1,15 @@
 import { inngest } from "@/lib/inngest";
 import {
   analyzePreparedSource,
+  isGeminiFallbackError,
   uploadSourceFile,
   waitForUploadedSource,
 } from "@/lib/providers/gemini";
-import { createFallbackLearningMaterial, createLearningMaterial } from "@/lib/providers/mistral";
+import {
+  createFallbackLearningMaterial,
+  createLearningMaterialWithFallback,
+} from "@/lib/providers/mistral";
+import { analyzeSourceWithFallback } from "@/lib/providers/source-fallback";
 import { createServiceClient } from "@/lib/supabase/server";
 import { lessonPreferencesSchema, type Lesson, type LessonPreferences } from "@/lib/types";
 
@@ -31,6 +36,32 @@ function sourceMimeType(sourcePath: string | null, sourceType: Lesson["source_ty
   if (extension === "mov") return "video/quicktime";
   if (extension === "webm") return "video/webm";
   return "video/mp4";
+}
+
+async function downloadSourceForFallback(
+  lesson: Lesson,
+  supabase: ReturnType<typeof createServiceClient>,
+) {
+  if (lesson.public_url) {
+    const response = await fetch(lesson.public_url, {
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!response.ok) throw new Error(`Could not download public source (${response.status})`);
+    return {
+      bytes: Buffer.from(await response.arrayBuffer()),
+      mimeType: response.headers.get("content-type") ?? sourceMimeType(null, lesson.source_type),
+      fileName: "public-source.mp4",
+    };
+  }
+
+  if (!lesson.source_path) throw new Error("No source was provided for fallback processing");
+  const { data, error } = await supabase.storage.from("sources").download(lesson.source_path);
+  if (error || !data) throw error ?? new Error("Could not download source for fallback processing");
+  return {
+    bytes: Buffer.from(await data.arrayBuffer()),
+    mimeType: sourceMimeType(lesson.source_path, lesson.source_type),
+    fileName: lesson.source_path.split("/").pop() ?? "source",
+  };
 }
 
 async function updateLesson(lessonId: string, values: Record<string, unknown>) {
@@ -87,13 +118,19 @@ async function claimLesson(lessonId: string, allowRetry: boolean) {
 
 function userFacingProcessingError(error: unknown, stage: string) {
   const message = error instanceof Error ? error.message : String(error);
-  if (/GOOGLE_GEMINI_API_KEY|MISTRAL_API_KEY|SUPABASE_SERVICE_ROLE_KEY|not configured|unauthorized|forbidden|\b401\b|\b403\b/i.test(message)) {
+  if (
+    /GOOGLE_GEMINI_API_KEY|MISTRAL_API_KEY|SUPABASE_SERVICE_ROLE_KEY|not configured|unauthorized|forbidden|\b401\b|\b403\b/i.test(
+      message,
+    )
+  ) {
     return "AI processing is not configured correctly on the server. Check the production environment variables.";
   }
   if (/download source|storage|No source was provided|unsupported|mime|file/i.test(message)) {
     return "We could not read this source. Try a supported video or PDF file, or a public video URL.";
   }
-  if (/429|quota|rate limit|resource exhausted|high demand|temporarily unavailable/i.test(message)) {
+  if (
+    /429|quota|rate limit|resource exhausted|high demand|temporarily unavailable/i.test(message)
+  ) {
     return "The AI service is temporarily at capacity. Please try again in a moment.";
   }
   if (/timed out|timeout|deadline/i.test(message)) {
@@ -150,33 +187,75 @@ export async function processLessonJob(
 
       if (!lesson.source_path) throw new Error("No source was provided to Gemini");
       const { data, error } = await supabase.storage.from("sources").download(lesson.source_path);
-      if (error || !data) throw error ?? new Error("Could not download source from Supabase Storage");
+      if (error || !data)
+        throw error ?? new Error("Could not download source from Supabase Storage");
 
-      const fileName = await uploadSourceFile({
-        bytes: Buffer.from(await data.arrayBuffer()),
-        mimeType: sourceMimeType(lesson.source_path, lesson.source_type),
-        fileName: lesson.source_path.split("/").pop(),
-      });
-      return { uploadedFileName: fileName };
+      try {
+        const fileName = await uploadSourceFile({
+          bytes: Buffer.from(await data.arrayBuffer()),
+          mimeType: sourceMimeType(lesson.source_path, lesson.source_type),
+          fileName: lesson.source_path.split("/").pop(),
+        });
+        return { uploadedFileName: fileName };
+      } catch (error) {
+        if (!isGeminiFallbackError(error)) throw error;
+        console.warn("Gemini source upload failed; switching to fallback source analysis", {
+          lessonId: lesson.id,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return { useFallback: true as const };
+      }
     });
 
     const sourcePart = await runStep("wait-for-source", async () => {
       if (sourceReference.uploadedFileName) {
-        return waitForUploadedSource({
-          fileName: sourceReference.uploadedFileName,
-          sourceType: lesson.source_type,
-        });
+        try {
+          return await waitForUploadedSource({
+            fileName: sourceReference.uploadedFileName,
+            sourceType: lesson.source_type,
+          });
+        } catch (error) {
+          if (!isGeminiFallbackError(error)) throw error;
+          console.warn("Gemini source preparation failed; switching to fallback source analysis", {
+            lessonId: lesson.id,
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        }
       }
+      if (sourceReference.useFallback) return null;
       if (!sourceReference.sourcePart) throw new Error("No source was provided to Gemini");
       return sourceReference.sourcePart;
     });
 
     const source = await runStep("analyze-source", async () => {
-      const analysis = await analyzePreparedSource({
-        sourceType: lesson.source_type,
-        sourcePart,
-        publicUrl: lesson.public_url ?? undefined,
-      });
+      let analysis;
+      if (!sourcePart) {
+        const fallbackSource = await downloadSourceForFallback(lesson, supabase);
+        analysis = await analyzeSourceWithFallback({
+          sourceType: lesson.source_type,
+          ...fallbackSource,
+        });
+      } else {
+        try {
+          analysis = await analyzePreparedSource({
+            sourceType: lesson.source_type,
+            sourcePart,
+            publicUrl: lesson.public_url ?? undefined,
+          });
+        } catch (error) {
+          if (!isGeminiFallbackError(error)) throw error;
+          console.warn("Gemini source analysis failed; switching to fallback source analysis", {
+            lessonId: lesson.id,
+            message: error instanceof Error ? error.message : String(error),
+          });
+          const fallbackSource = await downloadSourceForFallback(lesson, supabase);
+          analysis = await analyzeSourceWithFallback({
+            sourceType: lesson.source_type,
+            ...fallbackSource,
+          });
+        }
+      }
 
       // Mark extracting_content after source analysis so the stage is visible
       activeStage = "extracting_content";
@@ -184,7 +263,7 @@ export async function processLessonJob(
       return analysis;
     });
 
-    // Mark creating_material right before the Mistral step starts
+    // Mark creating_material right before the primary/fallback material step starts
     activeStage = "creating_material";
     await updateLesson(lesson.id, { processing_stage: "creating_material" });
 
@@ -197,10 +276,13 @@ export async function processLessonJob(
     let material;
     try {
       material = await runStep("create-learning-material", () =>
-        createLearningMaterial(source, preferences),
+        createLearningMaterialWithFallback(source, preferences),
       );
     } catch (error) {
-      if (process.env.NODE_ENV !== "production" && process.env.TRACE_ALLOW_LOCAL_FALLBACK === "true") {
+      if (
+        process.env.NODE_ENV !== "production" &&
+        process.env.TRACE_ALLOW_LOCAL_FALLBACK === "true"
+      ) {
         console.warn("Trace is using local learning-material fallback", error);
         material = createFallbackLearningMaterial(source, preferences);
       } else {

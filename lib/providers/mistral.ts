@@ -1,4 +1,5 @@
 import { Mistral } from "@mistralai/mistralai";
+import { completeGroqJson, isGroqConfigured } from "@/lib/providers/groq";
 import {
   learningMaterialSchema,
   type LearningMaterial,
@@ -75,6 +76,27 @@ export async function createLearningMaterial(
   const content = extractContent(response.choices?.[0]?.message?.content);
   if (!content) throw new Error("Mistral returned empty learning material");
   return learningMaterialSchema.parse(JSON.parse(extractJson(content)));
+}
+
+export async function createLearningMaterialWithFallback(
+  analysis: SourceAnalysis,
+  preferences: LessonPreferences,
+): Promise<LearningMaterial> {
+  try {
+    return await createLearningMaterial(analysis, preferences);
+  } catch (error) {
+    if (!isGroqConfigured()) throw error;
+    console.warn("Mistral learning-material generation failed; using Groq fallback", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+
+    const content = await completeGroqJson({
+      system:
+        "You are Trace's expert learning designer. Return only valid JSON matching the requested schema.",
+      prompt: materialPrompt(analysis, preferences),
+    });
+    return learningMaterialSchema.parse(JSON.parse(extractJson(content)));
+  }
 }
 
 export function createFallbackLearningMaterial(
@@ -165,7 +187,10 @@ export function answerTutorQuestionFallback(input: {
   analysis: SourceAnalysis;
   material: LearningMaterial;
 }) {
-  const questionWords = input.question.toLowerCase().split(/\W+/).filter((word) => word.length > 3);
+  const questionWords = input.question
+    .toLowerCase()
+    .split(/\W+/)
+    .filter((word) => word.length > 3);
   const matchedConcept = input.analysis.keyConcepts.find((concept) => {
     const conceptText = `${concept.term} ${concept.explanation}`.toLowerCase();
     return questionWords.some((word) => conceptText.includes(word));

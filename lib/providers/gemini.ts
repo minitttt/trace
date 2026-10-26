@@ -124,9 +124,9 @@ async function runBackgroundInteraction(
   throw new Error("Gemini source analysis timed out");
 }
 
-function isRetryableProviderError(error: unknown) {
+export function isGeminiFallbackError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  return /high demand|temporarily unavailable|rate limit|quota|resource exhausted|currently unavailable|not found|no longer available|timed out|timeout|deadline|status: failed|status: incomplete/i.test(
+  return /high demand|temporarily unavailable|rate limit|quota|resource exhausted|currently unavailable|not found|no longer available|timed out|timeout|deadline|status: failed|status: incomplete|not configured|unauthorized|forbidden|\b401\b|\b403\b|\b429\b|\b5\d{2}\b|invalid|JSON|schema|empty/i.test(
     message,
   );
 }
@@ -193,7 +193,7 @@ export async function analyzePreparedSource(input: {
       return sourceAnalysisSchema.parse(JSON.parse(extractJson(text)));
     } catch (error) {
       lastError = error;
-      if (!isRetryableProviderError(error)) throw error;
+      if (!isGeminiFallbackError(error)) throw error;
     }
   }
 

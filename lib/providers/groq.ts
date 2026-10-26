@@ -2,6 +2,9 @@ import type { LearningMaterial, SourceAnalysis } from "@/lib/types";
 
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = process.env.TRACE_GROQ_MODEL || "openai/gpt-oss-120b";
+const GROQ_TRANSCRIPTION_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
+const GROQ_TRANSCRIPTION_MODEL =
+  process.env.TRACE_GROQ_TRANSCRIPTION_MODEL || "whisper-large-v3-turbo";
 
 type TutorMessage = {
   role: "user" | "assistant";
@@ -24,6 +27,102 @@ ${JSON.stringify({ analysis: input.analysis, material: input.material })}`;
 
 export function isGroqConfigured() {
   return Boolean(process.env.GROQ_API_KEY);
+}
+
+export async function completeGroqJson(input: {
+  system: string;
+  prompt: string;
+  maxCompletionTokens?: number;
+}) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("GROQ_API_KEY is not configured");
+
+  const response = await fetch(GROQ_ENDPOINT, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      temperature: 0.2,
+      max_completion_tokens: input.maxCompletionTokens ?? 4_000,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: input.system },
+        { role: "user", content: input.prompt },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const details = await response.text().catch(() => "Unknown Groq error");
+    throw new Error(`Groq request failed (${response.status}): ${details.slice(0, 300)}`);
+  }
+
+  const payload = (await response.json()) as {
+    choices?: Array<{ message?: { content?: unknown } }>;
+  };
+  const content = payload.choices?.[0]?.message?.content;
+  if (typeof content !== "string" || !content.trim()) {
+    throw new Error("Groq returned an empty response");
+  }
+  return content.trim();
+}
+
+export type TranscriptionResult = {
+  text: string;
+  segments: Array<{ text: string; startSeconds?: number; endSeconds?: number }>;
+};
+
+export async function transcribeWithGroq(input: {
+  bytes: Buffer;
+  mimeType?: string;
+  fileName?: string;
+}): Promise<TranscriptionResult> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("GROQ_API_KEY is not configured");
+
+  const form = new FormData();
+  form.append(
+    "file",
+    new Blob([new Uint8Array(input.bytes)], {
+      type: input.mimeType ?? "video/mp4",
+    }),
+    input.fileName ?? "source.mp4",
+  );
+  form.append("model", GROQ_TRANSCRIPTION_MODEL);
+  form.append("response_format", "verbose_json");
+  form.append("timestamp_granularities[]", "segment");
+
+  const response = await fetch(GROQ_TRANSCRIPTION_ENDPOINT, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: form,
+  });
+
+  if (!response.ok) {
+    const details = await response.text().catch(() => "Unknown Groq transcription error");
+    throw new Error(`Groq transcription failed (${response.status}): ${details.slice(0, 300)}`);
+  }
+
+  const payload = (await response.json()) as {
+    text?: unknown;
+    segments?: Array<{ text?: unknown; start?: unknown; end?: unknown }>;
+  };
+  const text = typeof payload.text === "string" ? payload.text.trim() : "";
+  if (!text) throw new Error("Groq returned an empty transcription");
+
+  return {
+    text,
+    segments: (payload.segments ?? [])
+      .filter((segment) => typeof segment.text === "string" && segment.text.trim())
+      .map((segment) => ({
+        text: String(segment.text).trim(),
+        startSeconds: typeof segment.start === "number" ? segment.start : undefined,
+        endSeconds: typeof segment.end === "number" ? segment.end : undefined,
+      })),
+  };
 }
 
 export async function streamGroqTutorQuestion(
