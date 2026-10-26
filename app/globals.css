@@ -1,0 +1,93 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #f8f9fb;
+  --foreground: #17202b;
+  --surface: #ffffff;
+  --surface-muted: #f1f3f7;
+  --border: #e1e6ee;
+  --border-muted: #e8edf3;
+  --text-muted: #667085;
+  --text-subtle: #98a2b3;
+  --shadow-soft: 0 18px 50px rgba(28, 39, 58, 0.08);
+}
+
+.dark {
+  --background: #0f1117;
+  --foreground: #eef2f7;
+  --surface: #171b24;
+  --surface-muted: #202734;
+  --border: #303b4d;
+  --border-muted: #252d3a;
+  --text-muted: #a7b4c8;
+  --text-subtle: #7c8aa1;
+  --shadow-soft: 0 18px 50px rgba(0, 0, 0, 0.32);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--background);
+  color-scheme: light;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease;
+}
+
+input,
+textarea,
+select {
+  color: var(--foreground);
+  background-color: var(--surface);
+}
+
+select option {
+  color: var(--foreground);
+  background: var(--surface);
+}
+
+::placeholder {
+  color: var(--text-subtle);
+  opacity: 1;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+::selection {
+  background: #526dca;
+  color: #eef2f7;
+}
+
+.dark ::selection {
+  background: #6f8fff;
+  color: #eef2f7;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
